@@ -1,0 +1,502 @@
+---
+title: "horr"
+author: "NeoGo"
+date: "Monday, May 04, 2015"
+output: html_document
+---
+#Admin's notes
+1. Merchandise categories are always very accurate.
+2. The bids dataset had some missing data, causing 70 out of the 4700 bidders having 0 bids in the bids dataset.
+3. I'm sorry the data description was misleading. This column "Merchandise" is the category of the auction site campaign, which means the bidder might come to this site by way of searching for "home goods" but ended up bidding for "sporting goods" - and that leads to this field being "home goods". This categorical field could be a search term, or online advertisement. This field was aggregated from different sources, but overall it gives you an idea of where the bidder originated from, but not the product itself. And this is the reason that the same auction would have multiple categories. 
+
+#My notes
+1. One user may have several friends help him bid a product.
+2. Interesting human id : d6517684989560cbb0da1fb2f5bbba9b9y2st
+3. Difficult robot id:
+1aa0f088fe8934ef831bc5ef06da83e1xl2n4
+1a3abce206a20020186d49f835cacfe9gy90h
+2cffbc8171f2ef4b5cafe94f038c877bcert5
+dee44a87c5db48c9f6ca23e37d6f61074typq
+52aaef935c2b3aed6f3ae77bb2bc3513so5h1
+
+
+#Read in the data
+```{r}
+Train = read.csv("MyTrain8.csv",stringsAsFactor = FALSE)
+Test = read.csv("MyTest7.csv",stringsAsFactor = FALSE)
+BadTest = read.csv("BadTest.csv",stringsAsFactor = FALSE)
+
+Train = Train[!(Train$outcome==1 & Train$auc_num==1),] # remove robots with only 1 bid
+Train = Train[!(Train$outcome==1 & Train$device_auc_ratio>25),]
+Train = Train[!(Train$outcome==0 & Train$auc_num>1000),]
+
+dim(Train)
+
+Train = Train[sample(nrow(Train)),] # if you want to use k-fold cross validation
+
+
+library(caTools)
+spl = sample.split(Train$outcome, SplitRatio = 0.7)
+Train_s_train = subset(Train, spl == TRUE) # train of train
+Train_s_test = subset(Train, spl == FALSE) # test of train
+
+#BadTest = subset(Test, auc_num == 0)
+#BadTest$prediction = 0
+#BadTest = select(BadTest, bidder_id, prediction)
+
+
+bids = read.csv("Bids.csv")
+bidssmall = read.csv("bidssmall.csv")
+bids = arrange(bids, bidder_id, time, auction)
+library(data.table)
+library(bit64)
+# Read in bids #
+bids <- fread(input="MyBids22.csv", header=TRUE)
+# Get unique list of bidders and merchandise categories #
+merch.cnt.bidder <- bids[, length(unique(merchandise)), by=bidder_id]
+setnames(merch.cnt.bidder, c("bidder_id", "merchandise.cnt"))
+table(merch.cnt.bidder$merchandise.cnt)
+# Get unique list of auctions and merchandise categories #
+merch.cnt.auction <- bids[, length(unique(merchandise)), by=auction]
+setnames(merch.cnt.auction, c("auction", "merchandise.cnt"))
+table(merch.cnt.auction$merchandise.cnt)
+```
+
+```{r}
+library(tm)
+corpus = Corpus(VectorSource(bids$ip))
+#corpus = tm_map(corpus, tolower)
+corpus = tm_map(corpus, PlainTextDocument)
+#corpus = tm_map(corpus, removePunctuation)
+#corpus = tm_map(corpus, removeWords, stopwords("english"))
+#corpus = tm_map(corpus, stemDocument)
+frequencies = DocumentTermMatrix(corpus)
+sparse = removeSparseTerms(frequencies, 0.98)
+NewsSparse = as.data.frame(as.matrix(sparse))
+colnames(NewsSparse) = make.names(colnames(NewsSparse))
+```
+
+#Handle the bad data
+Removed 29 observation in the Training set without infomation.
+
+#Exploratory Analysis
+Train contains (2013 - 29) observations, 4 variables.
+Test contains (4700 - 70) observations, 3 variables.
+bids contains 7656334 observations, 9 variables.
+```{r}
+str(Train)
+str(Test)
+head(Train)
+head(Test)
+str(bidssmall)
+head(bidssmall)
+length(unique(bids$time)) # result: 776529
+length(unique(bids$bidder_id)) # result: 6614
+length(unique(bids$url)) # result: 1786351
+length(unique(bids$device)) # result: 7351
+
+length(unique(Train$bidder_id)) # result: 2013
+length(unique(Test$bidder_id)) # result: 4700
+names(bidssmall)
+
+bids[bids$bidder_id == "9434778d2268f1fa2a8ede48c0cd05c097zey",] # Robot
+bids[bids$bidder_id == "e98d8f348b266653b6784329782fd2e91vu3h",] # Human
+
+```
+
+#Data Wrangling
+```{r}
+
+#number of payment account this id has
+Train$pay_num = 0 
+Test$pay_num = 0
+for (i in 1:length(Train$payment_account)){
+        for (j in 1:length(Train$payment_account)){
+                if (Train$payment_account[j] == Train$payment_account[i]){
+                        Train$pay_num[i] = Train$pay_num[i] + 1
+                }
+        }
+}
+#All of them are paying with one account
+Train$pay_num = NULL
+Test$pay_num = NULL
+
+
+
+#number of address this id has
+Train$address_num = 0
+for (i in 1:length(Train$address)){
+        for (j in 1:length(Train$address)){
+                if (Train$address[j] == Train$address[i]){
+                        Train$address_num[i] = Train$address_num[i] + 1
+                }
+        }
+}
+#All of them are using unique addresses, no repeated addresses
+
+#find number of auctions participated
+Train$auc_num = NA
+Test$auc_num = NA
+
+#find the number of country in
+Train$country_num = NA
+Test$country_num = NA
+
+#find the number of device used
+Train$device_num = NA
+Test$device_num = NA
+
+
+#find the number of ip only consider the former part
+#e.g.: 192.168.1.1, only consider 192.168.
+Train$ip_num = NA
+Test$ip_num = NA
+library(stringr)
+bids$ip_ab = str_extract(bids$ip,"\\d+.\\d+")
+
+#find maximum number of bids made over a mechandise
+Train$maxnum_b_a_m = NA
+Test$maxnum_b_a_m = NA
+
+#find median number of bids of a bidder over mechandises
+Train$median_b_a_m = NA
+Test$median_b_a_m = NA
+
+
+#find the number of different kinds of goods bidding for
+Train$merchandise_num = NA
+Test$merchandise_num = NA
+
+#find the total number of bids made
+Train$total_bids_num = NA
+Test$total_bids_num = NA
+
+
+
+
+library(dplyr)
+for (id in Train$bidder_id){
+        #tmp_df = subset(bids, bids$bidder_id == id) # df for this bidder                
+        tmp_df = filter(bids, bidder_id == id) # df for this bidder
+        Train$total_bids_num[Train$bidder_id == id] = dim(tmp_df)[1]
+        Train$country_num[Train$bidder_id == id] = length(unique(tmp_df$country))
+        Train$ip_num[Train$bidder_id == id] = length(unique(tmp_df$ip_ab))
+        Train$merchandise_num[Train$bidder_id == id] = length(unique(tmp_df$merchandise))
+        Train$auc_num[Train$bidder_id == id] = length(unique(tmp_df$auction))
+        Train$device_num[Train$bidder_id == id] = length(unique(tmp_df$device))
+        Train$maxnum_b_a_m[Train$bidder_id == id] = as.numeric(sort(table(tmp_df$auction),
+                                                                    decreasing = TRUE)[1])
+        Train$median_b_a_m[Train$bidder_id == id] = median(head(sort(table(tmp_df$auction),
+                                                                     decreasing = TRUE)))
+        
+        
+}
+
+for (id in Test$bidder_id){
+        #tmp_df_test = subset(bids, bids$bidder_id == id) # df for this bidder
+        tmp_df_test = filter(bids, bidder_id == id) # df for this bidder
+        Test$total_bids_num[Test$bidder_id == id] = dim(tmp_df_test)[1]
+        Test$country_num[Test$bidder_id == id] = length(unique(tmp_df_test$country))
+        Test$ip_num[Test$bidder_id == id] = length(unique(tmp_df_test$ip_ab))
+        Test$merchandise_num[Test$bidder_id == id] = length(unique(tmp_df_test$merchandise))
+        Test$auc_num[Test$bidder_id == id] = length(unique(tmp_df_test$auction))
+        Test$device_num[Test$bidder_id == id] = length(unique(tmp_df_test$device))
+        Test$maxnum_b_a_m[Test$bidder_id == id] = as.numeric(sort(table(tmp_df_test$auction),
+                                                                    decreasing = TRUE)[1])
+        Test$median_b_a_m[Test$bidder_id == id] = median(head(sort(table(tmp_df_test$auction),
+                                                                     decreasing = TRUE)))
+}
+
+
+# Ratios
+Train = mutate(Train, total_auc_ratio = total_bids_num/auc_num)
+Test = mutate(Test, total_auc_ratio = total_bids_num/auc_num)
+
+Train = mutate(Train, max_median_prdt = median_b_a_m * maxnum_b_a_m) 
+Test = mutate(Test, max_median_prdt = median_b_a_m * maxnum_b_a_m)
+
+Train = mutate(Train, success_auc_ratio = success_bid_num/auc_num)
+Test = mutate(Test, success_auc_ratio = success_bid_num/auc_num)
+
+Train = mutate(Train, success2_auc_ratio = success_bid_num^2/auc_num)
+Test = mutate(Test, success2_auc_ratio = success_bid_num^2/auc_num)
+
+Train = mutate(Train, median_country_ratio = median_b_a_m/country_num) 
+Test = mutate(Test, median_country_ratio = median_b_a_m/country_num)
+
+Train = mutate(Train, ip_device_ratio = ip_num/device_num)
+Test = mutate(Test, ip_device_ratio = ip_num/device_num)
+
+
+Train$log_country_num = log(Train$country_num)
+Train$log_ip_num = log(Train$ip_num)
+Train$log_device_num = log(Train$device_num+1)
+Train$log_median_b_a_m = log(Train$median_b_a_m+1)
+Train$log_maxnum_b_a_m = log(Train$maxnum_b_a_m+1)
+Train$log_auc_num = log(Train$auc_num) 
+Train$min_bid_time = (Train$min_bid_time - mean(Train$min_bid_time))/sd(Train$min_bid_time)
+Train$log_total_auc_ratio = log(Train$total_auc_ratio)
+Train$log_total_bids_num = log(Train$total_bids_num)
+
+Test$log_country_num = log(Test$country_num)
+Test$log_ip_num = log(Test$ip_num)
+Test$log_device_num = log(Test$device_num)
+Test$log_median_b_a_m = log(Test$median_b_a_m+1)
+Test$log_maxnum_b_a_m = log(Test$maxnum_b_a_m+1)
+Test$log_auc_num = log(Test$auc_num) 
+Test$min_bid_time = (Test$min_bid_time - mean(Test$min_bid_time))/sd(Test$min_bid_time)
+Test$log_total_auc_ratio = log(Test$total_auc_ratio)
+Test$log_total_bids_num = log(Test$total_bids_num)
+
+
+
+
+
+Train$outcome = as.factor(Train$outcome)
+Train_s_train$outcome = as.factor(Train_s_train$outcome)
+Train_s_test$outcome = as.factor(Train_s_test$outcome)
+
+#find the winner of each auction
+#find successful bids of each user
+#Train$success_bid_num
+
+#find the minium time difference of bids
+#Train$min_bid_time
+```
+
+
+#Keeping files
+```{r}
+write.csv(Train,"MyTrain.csv",row.names=FALSE)
+write.csv(Test,"MyTest.csv",row.names=FALSE)
+```
+
+#Exploratory Analysis Again
+```{r}
+library(ggplot2)
+ggplot(data = Train, aes(x = country_num)) + 
+        geom_histogram(color = "black", fill = "lightblue") # right skewed
+ggplot(data = Train, aes(x = ip_num)) + 
+        geom_histogram(color = "black", fill = "lightblue") # right skewed
+ggplot(data = Train, aes(x = merchandise_num)) + 
+        geom_histogram(color = "black", fill = "lightblue") # 1983 of them are 1, 1 of them is 2, discarded
+ggplot(data = Train, aes(x = total_bids_num)) + 
+        geom_histogram(color = "black", fill = "lightblue", binwidth = 100) +
+        xlim(0, quantile(Train$total_bids_num, 0.95)) # right skewed
+ggplot(data = Train, aes(x = device_num)) + 
+        geom_histogram(color = "black", fill = "lightblue", binwidth = 10) +
+        xlim(0,500)# right skewed
+ggplot(data = Train, aes(median_b_a_m)) +
+        geom_histogram(color = "black", fill = "lightblue", binwidth = 50) +
+        xlim(0, quantile(Train$total_bids_num, 0.9)) # right skewed
+ggplot(data = Train, aes(maxnum_b_a_m)) +
+        geom_histogram(color = "black", fill = "lightblue", binwidth = 5) +
+        xlim(0, quantile(Train$maxnum_b_a_m, 0.9)) # right skewed
+ggplot(data = Train, aes(auc_num)) +
+        geom_histogram(color = "black", fill = "lightblue") # right skewed
+ggplot(data = Train, aes(min_bid_time) +
+        geom_histogram(color = "black", fill = "lightblue") +
+        xlim(0, quantile(Train$min_bid_time, 0.9)) # right skewed
+ggplot(data = Train, aes(success_bid_num)) +
+        geom_histogram(color = "black", fill = "lightblue", binwidth = 1) +
+        xlim(0, quantile(Train$success_bid_num, 0.99)) # right skewed
+ggplot(data = Train, aes(total_bids_num)) +
+        geom_histogram(color = "black", fill = "lightblue", binwidth = 1) +
+        xlim(0, quantile(Train$total_bids_num, 0.99)) # right skewed
+ggplot(data = Train, aes(total_auc_ratio)) +
+        geom_histogram(color = "black", fill = "lightblue") +
+        xlim(0, quantile(Train$total_auc_ratio, 0.99)) # right skewed
+
+
+
+
+
+
+
+
+ggplot(data = Train, aes(x = median_b_a_m, alpha = 0.5)) + 
+        geom_density(aes(fill = outcome)) + 
+        xlim(0, quantile(Train$median_b_a_m, 0.9))
+
+ggplot(data = Train, aes(x = max_median_prdt, alpha = 0.5)) + 
+        geom_density(aes(fill = outcome)) + 
+        xlim(0, quantile(Train$max_median_prdt, 0.9))
+
+ggplot(data = Train, aes(x = success2_auc_ratio, alpha = 0.5)) + 
+        geom_density(aes(fill = outcome)) + 
+        xlim(0, quantile(Train$success_auc_ratio, 0.9))
+
+ggplot(data = Train, aes(x = median_country_ratio, alpha = 0.5)) + 
+        geom_density(aes(fill = outcome)) + 
+        xlim(0, quantile(Train$median_country_ratio, 0.9))
+
+ggplot(data = Train, aes(x = device_num, y = outcome, color = outcome)) +
+        geom_jitter()
+
+ggplot(data = Train, aes(x = outcome, y = device_num)) +
+        geom_boxplot(aes(fill = outcome))
+
+ggplot(data = Train, aes(x = outcome, y = median_b_a_m)) +
+        geom_boxplot(aes(fill = outcome))
+
+Train$outcome = as.factor(Train$outcome)
+
+ggplot(data = Train, aes(x = median_b_a_m, y = robot_url_num, color = outcome, alpha=0.5)) +
+        geom_jitter()
+
+ggplot(data = Train, aes(x = device_auc_ratio, y = median_ip_ratio, 
+                         color = outcome, alpha = 0.5)) + 
+        geom_jitter()
+
+ggplot(data = Train, aes(x = max_median_prdt, y = median_device_ratio, 
+                         color = outcome, alpha = 0.5)) + 
+        geom_jitter()
+
+ggplot(data = Train, aes(x = median_b_a_m, y = auc_num, 
+                         color = outcome, alpha = 0.5)) + 
+        geom_jitter()
+```
+
+#Build Models
+##Logistic regression
+```{r}
+library(ROCR)
+logi = glm(outcome ~ robot_url_num, 
+           data = Train_s_train, family = "binomial")
+PredLogi = predict(logi, newdata = Train_s_test, type = "response")
+ROCRpred = prediction(PredLogi, Train_s_test$outcome)
+as.numeric(performance(ROCRpred,"auc")@y.values)
+```
+
+##Random forest
+```{r}
+library(randomForest)
+library(ROCR)
+Train$outcome = as.factor(Train$outcome)
+Train_s_train$outcome = as.factor(Train_s_train$outcome)
+set.seed(100)
+rf_mod1 = randomForest(outcome ~ country_num + ip_num +  
+                               device_num + median_b_a_m + maxnum_b_a_m + auc_num +
+                               total_bids_num  + total_auc_ratio + max_median_prdt +
+                               ip_device_ratio  + ip_auc_ratio +
+                               device_auc_ratio + median_auc_ratio + max_auc_ratio + 
+                               country_ip_ratio + median_ip_ratio + max_ip_ratio + 
+                               country_device_ratio + 
+                               median_device_ratio + max_device_ratio,
+                       data = Train_s_train, ntree = 10000, importance = TRUE,mtry = 2)
+varImpPlot(rf_mod1)
+PredRF2 = predict(rf_mod1, newdata = Train_s_test, type = "prob")[,2]
+ROCRpredrf = prediction(PredRF2, Train_s_test$outcome)
+as.numeric(performance(ROCRpredrf,"auc")@y.values)
+
+# variables: country_num + ip_num +  device_num + median_b_a_m + maxnum_b_a_m + auc_num +
+#                               total_bids_num  + total_auc_ratio + max_median_prdt +
+#                               success_auc_ratio + success2_auc_ratio +median_country_ratio + 
+#                                + ip_device_ratio 
+# unused variable:  min_bid_time + success_bid_num + robot_ip_num + robot_url_num
+# success_auc_ratio + success2_auc_ratio + success_ip_ratio + success_device_ratio
+# + country_auc_ratio + median_country_ratio 
+
+#using cross-validation
+library(caret)
+library(dplyr)
+Yvals = Train$outcome
+Yvals = ifelse(Yvals==0, "Human","Robot")
+Yvals = as.factor(Yvals)
+IndependentVars = select(Train, country_num, ip_num ,  
+                               device_num, median_b_a_m, maxnum_b_a_m, auc_num,
+                               total_bids_num, total_auc_ratio, max_median_prdt,
+                               ip_device_ratio, ip_auc_ratio,
+                               device_auc_ratio, median_auc_ratio, max_auc_ratio, 
+                               country_ip_ratio, median_ip_ratio, max_ip_ratio, 
+                               country_device_ratio, 
+                               median_device_ratio, max_device_ratio)
+fitControl <- trainControl(method="repeatedcv", number=10, repeats = 5, classProbs = TRUE, summaryFunction = twoClassSummary)
+tr = train(IndependentVars, Yvals, method="rf", 
+           nodesize=5, ntree=10000, metric="ROC", trControl=fitControl)
+#best rf: 0.8918572 with mtry = 2, nodesize = 5, ntree = 10000
+#public leader board: 0.88660
+predRFCV = predict(tr$finalModel,newdata=Test,type="prob")[,2]
+
+
+```
+
+##Gradient Boosting Machine
+```{r}
+library(gbm)
+Train$outcome = as.factor(Train$outcome)
+gbmmod1 = gbm(outcome ~ country_num + ip_num + total_auc_ratio +
+                               total_bids_num + min_bid_time +
+                               device_num + median_b_a_m + maxnum_b_a_m +
+                               success_bid_num + auc_num + robot_ip_num + robot_url_num, 
+              data = Train, dist = "bernoulli", n.tree = 500, shrinkage = 0.005, 
+              interaction.depth =5)
+predGBM1 = 1 - predict(gbmmod1, newdata = Test, type = "response", n.trees = 500)
+
+
+#Using cross validation
+library(caret)
+modelLookup('gbm')
+
+Yvals = as.factor(Train$outcome)
+Yvals = ifelse(Yvals==0, "Human","Robot")
+Yvals = as.factor(Yvals)
+IndependentVars = select(Train, country_num, ip_num, device_num, 
+                         median_b_a_m, maxnum_b_a_m, auc_num, min_bid_time,
+                         total_auc_ratio, success_bid_num, total_bids_num, 
+                         max_median_prdt, success_auc_ratio,
+                         success2_auc_ratio, median_country_ratio, ip_device_ratio,
+                         robot_ip_num, robot_url_num)
+fitControl <- trainControl(method="repeatedcv", number=10, repeats = 3, classProbs = TRUE, summaryFunction = twoClassSummary)
+gbmGrid = expand.grid(interaction.depth = c(1,3,5), 
+                      n.trees = (4:5)*100, shrinkage = 0.005)
+gbmFit = train(IndependentVars, Yvals, method = "gbm", metric="ROC", trControl = fitControl,verbose=FALSE,tuneGrid=gbmGrid)
+#best gbm model till now is: 0.9671579 with n.trees=500, interaction.depth=5, shrinkage = 0.005
+predGBMCV = predict(gbmFit,newdata=Test,type="prob")[,2]
+```
+
+#Neural Networks
+```{r}
+library(nnet) 
+NNmod = nnet(Popular~.,outcome ~ country_num + ip_num + total_bids_num + 
+                               device_num + median_b_a_m + maxnum_b_a_m +
+                               success_bid_num + auc_num , data = Train,
+             size = 5,Hess=FALSE,maxit=2000)
+predictNN = predict(NNmod, newdata = Test)
+```
+
+#write to file
+```{r}
+MySubmission = data.frame(bidder_id = Test$bidder_id, prediction = predRFCV) # change prediction
+write.csv(rbind(MySubmission, BadTest), "SubmissionRF20-false.csv", row.names=FALSE) # change file name
+```
+
+
+
+```{r}
+sb1 = read.csv("SubmissionRF1.csv")
+sb2 = read.csv("SubmissionRF2.csv")
+sb3 = read.csv("SubmissionRF3.csv")
+sb4 = read.csv("SubmissionRF4.csv")
+sb5 = read.csv("SubmissionRF5.csv")
+sb6 = read.csv("SubmissionRF6.csv")
+sb7 = read.csv("SubmissionRF7.csv")
+sb8 = read.csv("SubmissionRF8.csv")
+sb9 = read.csv("SubmissionRF9.csv")
+sb10 = read.csv("SubmissionPython_RF1.csv")
+sb11 = read.csv("SubmissionPython_RF2.csv")
+sb12 = read.csv("SubmissionLogi.csv")
+
+sbf1 = read.csv("SubmissionRF17.csv")
+sbf2 = read.csv("SubmissionRF18.csv")
+sbf3 = read.csv("SubmissionRF19.csv")
+sbf4 = read.csv("SubmissionRF20.csv")
+
+#!!!!!!bidder_id inconsistent over sb1 - sb12
+pred_avg = (sb7$prediction + sb6$prediction)/2
+
+MySubmission = data.frame(bidder_id = sb6$bidder_id, prediction = pred_avg)
+write.csv(MySubmission, "Submission_avg_final.csv",row.names=FALSE)
+
+```
+
