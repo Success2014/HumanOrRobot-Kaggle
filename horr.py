@@ -48,7 +48,7 @@ if exploreDatabase:
         db = MySQLdb.connect(
                     host = "localhost",
                     user = "root",
-                    passwd = "YOUyidi1",
+                    passwd = "********",
                     db = "facebook")
         
         
