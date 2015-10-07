@@ -4,12 +4,12 @@ author: "NeoGo"
 date: "Monday, May 04, 2015"
 output: html_document
 ---
-#Admin's notes
+# Admin's notes
 1. Merchandise categories are always very accurate.
 2. The bids dataset had some missing data, causing 70 out of the 4700 bidders having 0 bids in the bids dataset.
 3. I'm sorry the data description was misleading. This column "Merchandise" is the category of the auction site campaign, which means the bidder might come to this site by way of searching for "home goods" but ended up bidding for "sporting goods" - and that leads to this field being "home goods". This categorical field could be a search term, or online advertisement. This field was aggregated from different sources, but overall it gives you an idea of where the bidder originated from, but not the product itself. And this is the reason that the same auction would have multiple categories. 
 
-#My notes
+# My notes
 1. One user may have several friends help him bid a product.
 2. Interesting human id : d6517684989560cbb0da1fb2f5bbba9b9y2st
 3. Difficult robot id:
@@ -20,15 +20,68 @@ dee44a87c5db48c9f6ca23e37d6f61074typq
 52aaef935c2b3aed6f3ae77bb2bc3513so5h1
 
 
-#Read in the data
-```{r}
+# Read in the original data
+```{r read_original_data, echo=FALSE,cache=TRUE}
+Train_origin = read.csv("train.csv", stringsAsFactor=FALSE)
+Test_origin = read.csv("test.csv",stringsAsFactor=FALSE)
+head(Train_origin,10)
+head(Test_origin,10)
+str(Train_origin)
+str(Test_origin)
+
+dim(Train_origin)
+length(unique(Train_origin$payment_account))# no information provided by payment_account
+length(unique(Train_origin$address))# no information provided by address
+
+rm(Train_origin)
+rm(Test_origin)
+```
+
+# Read data in MySQL
+```{r readMySQL, echo=FALSE, cache=TRUE}
+library(RMySQL)
+mydb = dbConnect(MySQL(), user='root', password='YOUyidi1', dbname='facebook', host='localhost')
+dbListTables(mydb) # list the tables
+dbListFields(mydb,'train') # list the fields
+dbListFields(mydb, 'test')
+dbListFields(mydb, 'bids')
+
+rs1 = dbSendQuery(mydb, "select * from train")
+train = fetch(rs1, -1)
+
+rs2 = dbSendQuery(mydb, "select * from test")
+test = fetch(rs2, -1)
+
+rs3 = dbSendQuery(mydb, "select * from bids")
+bids = fetch(rs3, -1)
+
+# check a robot
+rs4 = dbSendQuery(mydb, "select * from bids where bidder_id = '9434778d2268f1fa2a8ede48c0cd05c097zey'")
+RobotExample = fetch(rs4, -1)
+
+# check a human
+rs5 = dbSendQuery(mydb, "select * from bids where bidder_id = 'e98d8f348b266653b6784329782fd2e91vu3h'")
+HumanExample = fetch(rs5, -1)
+
+rs7 = dbSendQuery(mydb, "select bidder_id, count(bidder_id) as auc_num from bids group by bidder_id")
+fetch(rs7, -1)
+
+# write tables
+dbWriteTable(mydb, name = 'RobotExample', value = RobotExample)
+dbWriteTable(mydb, name = 'HumanExample', value = HumanExample)
+```
+
+
+# Read in the preprocess data
+```{r read_preprocessed_data, echo=FALSE, cache=TRUE}
 Train = read.csv("MyTrain8.csv",stringsAsFactor = FALSE)
 Test = read.csv("MyTest7.csv",stringsAsFactor = FALSE)
 BadTest = read.csv("BadTest.csv",stringsAsFactor = FALSE)
 
 Train = Train[!(Train$outcome==1 & Train$auc_num==1),] # remove robots with only 1 bid
-Train = Train[!(Train$outcome==1 & Train$device_auc_ratio>25),]
-Train = Train[!(Train$outcome==0 & Train$auc_num>1000),]
+# Some possible outliers
+#Train = Train[!(Train$outcome==1 & Train$device_auc_ratio>25),]
+#Train = Train[!(Train$outcome==0 & Train$auc_num>3000),]
 
 dim(Train)
 
@@ -39,11 +92,19 @@ library(caTools)
 spl = sample.split(Train$outcome, SplitRatio = 0.7)
 Train_s_train = subset(Train, spl == TRUE) # train of train
 Train_s_test = subset(Train, spl == FALSE) # test of train
+Train_s_train = Train_s_train[sample(nrow(Train_s_train)),]
+Train_s_train$outcome = as.factor(Train_s_train$outcome)
+Train_s_test$outcome = as.factor(Train_s_test$outcome)
+
+
+sum(Train_s_train$outcome == 1) # check if robots are properly spreaded out
+sum(Train_s_test$outcome == 1)
+head(Train_s_train$outcome,20)
+
 
 #BadTest = subset(Test, auc_num == 0)
 #BadTest$prediction = 0
 #BadTest = select(BadTest, bidder_id, prediction)
-
 
 bids = read.csv("Bids.csv")
 bidssmall = read.csv("bidssmall.csv")
@@ -51,18 +112,18 @@ bids = arrange(bids, bidder_id, time, auction)
 library(data.table)
 library(bit64)
 # Read in bids #
-bids <- fread(input="MyBids22.csv", header=TRUE)
+#bids <- fread(input="MyBids22.csv", header=TRUE)
 # Get unique list of bidders and merchandise categories #
-merch.cnt.bidder <- bids[, length(unique(merchandise)), by=bidder_id]
-setnames(merch.cnt.bidder, c("bidder_id", "merchandise.cnt"))
-table(merch.cnt.bidder$merchandise.cnt)
+#merch.cnt.bidder <- bids[, length(unique(merchandise)), by=bidder_id]
+#setnames(merch.cnt.bidder, c("bidder_id", "merchandise.cnt"))
+#table(merch.cnt.bidder$merchandise.cnt)
 # Get unique list of auctions and merchandise categories #
-merch.cnt.auction <- bids[, length(unique(merchandise)), by=auction]
-setnames(merch.cnt.auction, c("auction", "merchandise.cnt"))
-table(merch.cnt.auction$merchandise.cnt)
+#merch.cnt.auction <- bids[, length(unique(merchandise)), by=auction]
+#setnames(merch.cnt.auction, c("auction", "merchandise.cnt"))
+#table(merch.cnt.auction$merchandise.cnt)
 ```
 
-```{r}
+```{r try_BagofWords, echo=FALSE, cache=TRUE}
 library(tm)
 corpus = Corpus(VectorSource(bids$ip))
 #corpus = tm_map(corpus, tolower)
@@ -76,18 +137,16 @@ NewsSparse = as.data.frame(as.matrix(sparse))
 colnames(NewsSparse) = make.names(colnames(NewsSparse))
 ```
 
-#Handle the bad data
-Removed 29 observation in the Training set without infomation.
+# Handle the bad data
+-Removed 29 observations in the Training set without infomation in the bids dataset.
+-Removed 70 observations in the Test set without information in the bids dataset.
 
-#Exploratory Analysis
-Train contains (2013 - 29) observations, 4 variables.
-Test contains (4700 - 70) observations, 3 variables.
-bids contains 7656334 observations, 9 variables.
-```{r}
-str(Train)
-str(Test)
-head(Train)
-head(Test)
+# Exploratory Analysis
+-Train contains (2013 - 29) observations, 4 variables.
+-Test contains (4700 - 70) observations, 3 variables.
+-bids contains 7656334 observations, 9 variables.
+
+```{r ExploreBids, echo=FALSE, cache=TRUE}
 str(bidssmall)
 head(bidssmall)
 length(unique(bids$time)) # result: 776529
@@ -99,15 +158,22 @@ length(unique(Train$bidder_id)) # result: 2013
 length(unique(Test$bidder_id)) # result: 4700
 names(bidssmall)
 
+# look at some particular example 
 bids[bids$bidder_id == "9434778d2268f1fa2a8ede48c0cd05c097zey",] # Robot
 bids[bids$bidder_id == "e98d8f348b266653b6784329782fd2e91vu3h",] # Human
+RobotExample = read.csv("RobotExample.csv",stringsAsFactor = FALSE)
+HumanExample = read.csv("HumanExample.csv",stringsAsFactor = FALSE)
 
 ```
 
-#Data Wrangling
-```{r}
+# Feature Engineering
+
+The most important part.
+
+```{r feature_engineering, echo=FALSE, cache=TRUE}
 
 #number of payment account this id has
+#Use hash table in Python
 Train$pay_num = 0 
 Test$pay_num = 0
 for (i in 1:length(Train$payment_account)){
@@ -117,13 +183,9 @@ for (i in 1:length(Train$payment_account)){
                 }
         }
 }
-#All of them are paying with one account
-Train$pay_num = NULL
-Test$pay_num = NULL
+#Found that all bidders were paying with one account
 
-
-
-#number of address this id has
+#number of address each bidder had
 Train$address_num = 0
 for (i in 1:length(Train$address)){
         for (j in 1:length(Train$address)){
@@ -132,17 +194,17 @@ for (i in 1:length(Train$address)){
                 }
         }
 }
-#All of them are using unique addresses, no repeated addresses
+#Found that All of them were using unique addresses, no repeated addresses
 
-#find number of auctions participated
+#find number of auctions each bidder participated
 Train$auc_num = NA
 Test$auc_num = NA
 
-#find the number of country in
+#find the number of country each bidder resided
 Train$country_num = NA
 Test$country_num = NA
 
-#find the number of device used
+#find the number of device each bidder used
 Train$device_num = NA
 Test$device_num = NA
 
@@ -162,7 +224,6 @@ Test$maxnum_b_a_m = NA
 Train$median_b_a_m = NA
 Test$median_b_a_m = NA
 
-
 #find the number of different kinds of goods bidding for
 Train$merchandise_num = NA
 Test$merchandise_num = NA
@@ -170,8 +231,6 @@ Test$merchandise_num = NA
 #find the total number of bids made
 Train$total_bids_num = NA
 Test$total_bids_num = NA
-
-
 
 
 library(dplyr)
@@ -227,6 +286,7 @@ Test = mutate(Test, median_country_ratio = median_b_a_m/country_num)
 Train = mutate(Train, ip_device_ratio = ip_num/device_num)
 Test = mutate(Test, ip_device_ratio = ip_num/device_num)
 
+#Try log transformations and rescaling, didn't turn out to be very useful
 
 Train$log_country_num = log(Train$country_num)
 Train$log_ip_num = log(Train$ip_num)
@@ -251,7 +311,7 @@ Test$log_total_bids_num = log(Test$total_bids_num)
 
 
 
-
+#Change outcome to be factors! NECESSARY!
 Train$outcome = as.factor(Train$outcome)
 Train_s_train$outcome = as.factor(Train_s_train$outcome)
 Train_s_test$outcome = as.factor(Train_s_test$outcome)
@@ -265,21 +325,27 @@ Train_s_test$outcome = as.factor(Train_s_test$outcome)
 ```
 
 
-#Keeping files
-```{r}
+# Saving files
+```{r saving_files, echo=FALSE, cache=TRUE}
 write.csv(Train,"MyTrain.csv",row.names=FALSE)
 write.csv(Test,"MyTest.csv",row.names=FALSE)
 ```
 
-#Exploratory Analysis Again
-```{r}
+# Exploratory Analysis Again
+
+## Univarite 
+
+```{r EDA_plot_uni, echo=FALSE, cache=TRUE}
 library(ggplot2)
+ggplot(data = Train, aes(x = auc_num)) + 
+        geom_histogram(color = "black", fill = "lightblue", binwidth=20) 
+
 ggplot(data = Train, aes(x = country_num)) + 
         geom_histogram(color = "black", fill = "lightblue") # right skewed
 ggplot(data = Train, aes(x = ip_num)) + 
         geom_histogram(color = "black", fill = "lightblue") # right skewed
 ggplot(data = Train, aes(x = merchandise_num)) + 
-        geom_histogram(color = "black", fill = "lightblue") # 1983 of them are 1, 1 of them is 2, discarded
+        geom_histogram(color = "black", fill = "lightblue") # 1983 of them are 1, 1 of them is 2, so I discarded this feature
 ggplot(data = Train, aes(x = total_bids_num)) + 
         geom_histogram(color = "black", fill = "lightblue", binwidth = 100) +
         xlim(0, quantile(Train$total_bids_num, 0.95)) # right skewed
@@ -307,31 +373,35 @@ ggplot(data = Train, aes(total_auc_ratio)) +
         geom_histogram(color = "black", fill = "lightblue") +
         xlim(0, quantile(Train$total_auc_ratio, 0.99)) # right skewed
 
+Train$outcome = as.factor(Train$outcome)
 
+ggplot(data = Train, aes(x = auc_num)) + 
+        geom_density(aes(fill = outcome), alpha = 0.5)
 
-
-
-
-
-
-ggplot(data = Train, aes(x = median_b_a_m, alpha = 0.5)) + 
-        geom_density(aes(fill = outcome)) + 
+ggplot(data = Train, aes(x = median_b_a_m)) + 
+        geom_density(aes(fill = outcome), alpha = 0.5) + 
         xlim(0, quantile(Train$median_b_a_m, 0.9))
 
-ggplot(data = Train, aes(x = max_median_prdt, alpha = 0.5)) + 
-        geom_density(aes(fill = outcome)) + 
+ggplot(data = Train, aes(x = max_median_prdt)) + 
+        geom_density(aes(fill = outcome), alpha = 0.5) + 
         xlim(0, quantile(Train$max_median_prdt, 0.9))
 
-ggplot(data = Train, aes(x = success2_auc_ratio, alpha = 0.5)) + 
-        geom_density(aes(fill = outcome)) + 
+ggplot(data = Train, aes(x = success2_auc_ratio)) + 
+        geom_density(aes(fill = outcome), alpha = 0.5) + 
         xlim(0, quantile(Train$success_auc_ratio, 0.9))
 
-ggplot(data = Train, aes(x = median_country_ratio, alpha = 0.5)) + 
-        geom_density(aes(fill = outcome)) + 
+ggplot(data = Train, aes(x = median_country_ratio)) + 
+        geom_density(aes(fill = outcome), alpha = 0.5) + 
         xlim(0, quantile(Train$median_country_ratio, 0.9))
+```
+
+## Bivariate
+
+```{r EDA_plot_biv, echo=FALSE, cache=TRUE}
+Train$outcome = as.factor(Train$outcome)
 
 ggplot(data = Train, aes(x = device_num, y = outcome, color = outcome)) +
-        geom_jitter()
+        geom_jitter()#find outlier, device_num > 2000
 
 ggplot(data = Train, aes(x = outcome, y = device_num)) +
         geom_boxplot(aes(fill = outcome))
@@ -339,27 +409,26 @@ ggplot(data = Train, aes(x = outcome, y = device_num)) +
 ggplot(data = Train, aes(x = outcome, y = median_b_a_m)) +
         geom_boxplot(aes(fill = outcome))
 
-Train$outcome = as.factor(Train$outcome)
 
-ggplot(data = Train, aes(x = median_b_a_m, y = robot_url_num, color = outcome, alpha=0.5)) +
-        geom_jitter()
+#should not use robot_url_num this kind of feature, directly derived from the outcome
+ggplot(data = Train, aes(x = median_b_a_m, y = robot_url_num, color = outcome, 
+                         alpha=0.5)) + geom_jitter()
+
 
 ggplot(data = Train, aes(x = device_auc_ratio, y = median_ip_ratio, 
-                         color = outcome, alpha = 0.5)) + 
-        geom_jitter()
+                         color = outcome, alpha = 0.5)) + geom_jitter()
 
 ggplot(data = Train, aes(x = max_median_prdt, y = median_device_ratio, 
-                         color = outcome, alpha = 0.5)) + 
-        geom_jitter()
+                         color = outcome, alpha = 0.5)) + geom_jitter()
 
 ggplot(data = Train, aes(x = median_b_a_m, y = auc_num, 
-                         color = outcome, alpha = 0.5)) + 
-        geom_jitter()
+                         color = outcome, alpha = 0.5)) + geom_jitter()
 ```
 
-#Build Models
-##Logistic regression
-```{r}
+# Build Models
+## Logistic regression
+
+```{r LogisticReg, echo=FALSE, cache=TRUE}
 library(ROCR)
 logi = glm(outcome ~ robot_url_num, 
            data = Train_s_train, family = "binomial")
@@ -368,8 +437,9 @@ ROCRpred = prediction(PredLogi, Train_s_test$outcome)
 as.numeric(performance(ROCRpred,"auc")@y.values)
 ```
 
-##Random forest
-```{r}
+## Random forest
+
+```{r RandomForest, echo=FALSE, cache=TRUE}
 library(randomForest)
 library(ROCR)
 Train$outcome = as.factor(Train$outcome)
@@ -383,7 +453,7 @@ rf_mod1 = randomForest(outcome ~ country_num + ip_num +
                                country_ip_ratio + median_ip_ratio + max_ip_ratio + 
                                country_device_ratio + 
                                median_device_ratio + max_device_ratio,
-                       data = Train_s_train, ntree = 10000, importance = TRUE,mtry = 2)
+                       data = Train_s_train, ntree = 1000, importance = TRUE,mtry = 2)
 varImpPlot(rf_mod1)
 PredRF2 = predict(rf_mod1, newdata = Train_s_test, type = "prob")[,2]
 ROCRpredrf = prediction(PredRF2, Train_s_test$outcome)
@@ -411,9 +481,9 @@ IndependentVars = select(Train, country_num, ip_num ,
                                country_ip_ratio, median_ip_ratio, max_ip_ratio, 
                                country_device_ratio, 
                                median_device_ratio, max_device_ratio)
-fitControl <- trainControl(method="repeatedcv", number=10, repeats = 5, classProbs = TRUE, summaryFunction = twoClassSummary)
+fitControl <- trainControl(method="repeatedcv", number=10, repeats = 5, classProbs = TRUE, summaryFunction = twoClassSummary)#twoClassSummary for AUC
 tr = train(IndependentVars, Yvals, method="rf", 
-           nodesize=5, ntree=10000, metric="ROC", trControl=fitControl)
+           nodesize=5, ntree=1000, metric="ROC", trControl=fitControl)
 #best rf: 0.8918572 with mtry = 2, nodesize = 5, ntree = 10000
 #public leader board: 0.88660
 predRFCV = predict(tr$finalModel,newdata=Test,type="prob")[,2]
@@ -421,8 +491,9 @@ predRFCV = predict(tr$finalModel,newdata=Test,type="prob")[,2]
 
 ```
 
-##Gradient Boosting Machine
-```{r}
+## Gradient Boosting Machine
+
+```{r GradientBoosting, echo=FALSE, cache=TRUE}
 library(gbm)
 Train$outcome = as.factor(Train$outcome)
 gbmmod1 = gbm(outcome ~ country_num + ip_num + total_auc_ratio +
@@ -455,8 +526,9 @@ gbmFit = train(IndependentVars, Yvals, method = "gbm", metric="ROC", trControl =
 predGBMCV = predict(gbmFit,newdata=Test,type="prob")[,2]
 ```
 
-#Neural Networks
-```{r}
+## Neural Networks
+
+```{r NeuralNetworks, echo=FALSE, cache=TRUE}
 library(nnet) 
 NNmod = nnet(Popular~.,outcome ~ country_num + ip_num + total_bids_num + 
                                device_num + median_b_a_m + maxnum_b_a_m +
@@ -465,15 +537,17 @@ NNmod = nnet(Popular~.,outcome ~ country_num + ip_num + total_bids_num +
 predictNN = predict(NNmod, newdata = Test)
 ```
 
-#write to file
-```{r}
+# Write results to file
+
+```{r WriteResult, echo=FALSE, cache=TRUE}
 MySubmission = data.frame(bidder_id = Test$bidder_id, prediction = predRFCV) # change prediction
 write.csv(rbind(MySubmission, BadTest), "SubmissionRF20-false.csv", row.names=FALSE) # change file name
 ```
 
 
+# Stacking models
 
-```{r}
+```{r StackModels, echo=FALSE, cache=TRUE}
 sb1 = read.csv("SubmissionRF1.csv")
 sb2 = read.csv("SubmissionRF2.csv")
 sb3 = read.csv("SubmissionRF3.csv")
